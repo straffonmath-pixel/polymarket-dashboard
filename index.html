@@ -186,9 +186,19 @@
       return false;
     };
 
+    // ─── Persistence ───
+    const STORAGE_KEY = 'pm_alpha_tracker';
+    const loadSaved = () => {
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch (_) { return {}; }
+    };
+    const saveWallets = (wallets) => {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ wallets })); } catch (_) {}
+    };
+
     // ─── State Management ───
+    const saved = loadSaved();
     const initialState = {
-      wallets: [],
+      wallets: saved.wallets || [],
       settings: { dollarThreshold: 50, refreshInterval: 60, tagFilter: [], sideFilter: 'ALL', timeWindow: '24h' },
       activityFeed: [],
       convergenceAlerts: [],
@@ -252,6 +262,16 @@
         default:
           return state;
       }
+    }
+
+    // Wrap reducer to persist wallets on every wallet-changing action
+    const WALLET_ACTIONS = new Set(['ADD_WALLET', 'REMOVE_WALLET', 'BULK_IMPORT', 'ADD_TRADES']);
+    function persistingReducer(state, action) {
+      const next = reducer(state, action);
+      if (WALLET_ACTIONS.has(action.type) && next.wallets !== state.wallets) {
+        saveWallets(next.wallets);
+      }
+      return next;
     }
 
     // ─── Convergence Detection ───
@@ -1008,7 +1028,7 @@
 
     // ─── Main App ───
     const App = () => {
-      const [state, dispatch] = useReducer(reducer, initialState);
+      const [state, dispatch] = useReducer(persistingReducer, initialState);
       const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
       const [mobileTab, setMobileTab] = useState('feed');
       const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
