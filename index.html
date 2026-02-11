@@ -401,6 +401,7 @@
 
     // ─── Add Wallet Form ───
     const AddWalletForm = ({ dispatch, wallets }) => {
+      const [expanded, setExpanded] = useState(wallets.length === 0);
       const [address, setAddress] = useState('');
       const [nickname, setNickname] = useState('');
       const [tags, setTags] = useState([]);
@@ -415,6 +416,7 @@
         dispatch({ type: 'ADD_WALLET', wallet: { address, nickname: nickname.trim(), tags } });
         dispatch({ type: 'ADD_TOAST', toast: { message: `Added ${nickname.trim()} to watchlist` } });
         setAddress(''); setNickname(''); setTags([]);
+        setExpanded(false);
       };
 
       const toggleTag = (tag) => setTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
@@ -425,10 +427,24 @@
         }
       };
 
+      if (!expanded) {
+        return (
+          <div className="p-3">
+            <button onClick={() => setExpanded(true)} className="w-full bg-accent-green/10 text-accent-green border border-accent-green/30 rounded-lg py-2 text-sm font-sans font-medium hover:bg-accent-green/20 transition flex items-center justify-center gap-2">
+              <Icon name="Plus" size={14} /> Add Wallet
+            </button>
+          </div>
+        );
+      }
+
       return (
-        <div className="p-3 space-y-2.5">
+        <div className="p-3 space-y-2.5 slide-in">
+          <div className="flex items-center justify-between">
+            <label className="text-[11px] uppercase tracking-wider text-slate-500 font-sans font-medium">New Wallet</label>
+            <button onClick={() => setExpanded(false)} className="text-slate-600 hover:text-slate-400 transition"><Icon name="X" size={13} /></button>
+          </div>
           <div>
-            <label className="text-[11px] uppercase tracking-wider text-slate-500 font-sans font-medium">Wallet Address</label>
+            <label className="text-[11px] uppercase tracking-wider text-slate-500 font-sans font-medium">Address</label>
             <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="0x..." className="mt-1 w-full bg-navy-900 border border-navy-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-accent-green/50" />
           </div>
           <div>
@@ -555,7 +571,7 @@
               ))}
             </div>
           </div>
-          <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 480px)' }}>
+          <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 320px)' }}>
             {filtered.length === 0 && (
               <p className="text-slate-600 text-xs font-sans text-center py-4">
                 {wallets.length === 0 ? 'No wallets added yet' : 'No wallets match filters'}
@@ -745,19 +761,34 @@
       );
     };
 
+    // ─── Helpers for display ───
+    const isHexNickname = (name) => /^0x[a-fA-F0-9]{10,}/.test(name) || name.length > 30;
+    const displayNickname = (name) => isHexNickname(name) ? formatAddress(name) : name;
+
+    const tradeSizeClass = (dollarValue) => {
+      if (dollarValue >= 5000) return 'text-accent-green font-bold text-sm';
+      if (dollarValue >= 1000) return 'text-slate-100 font-bold text-xs';
+      if (dollarValue >= 500) return 'text-slate-200 font-semibold text-xs';
+      return 'text-slate-400 text-xs';
+    };
+
     // ─── Trade Card ───
     const TradeCard = ({ trade }) => {
       const isBuy = trade.side === 'BUY';
       const directionLabel = `${trade.side} ${trade.outcome}`;
       const odds = Math.round(trade.price * 100);
       const marketUrl = trade.slug ? `https://polymarket.com/event/${trade.slug}` : null;
+      const profileUrl = `https://polymarket.com/profile/${trade.walletAddress}`;
+      const isWhale = trade.dollarValue >= 5000;
 
       return (
-        <div className="slide-in px-4 py-3 border-b border-navy-700/30 hover:bg-navy-700/20 transition">
+        <div className={`slide-in px-4 py-3 border-b border-navy-700/30 hover:bg-navy-700/20 transition ${isWhale ? 'border-l-2 border-l-accent-green/40' : ''}`}>
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
-                <span className="font-sans font-medium text-sm text-slate-200">{trade.walletNickname}</span>
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="font-sans font-medium text-sm text-slate-200 hover:text-accent-green transition truncate">
+                  {displayNickname(trade.walletNickname)}
+                </a>
                 {trade.walletTags?.[0] && <TagPill tag={trade.walletTags[0]} small />}
               </div>
               <div className="text-sm font-sans text-slate-300 mb-1.5 leading-snug">
@@ -767,7 +798,7 @@
               </div>
               <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
                 <span className={`font-semibold ${isBuy ? 'text-accent-green' : 'text-accent-red'}`}>{directionLabel}</span>
-                <span className="text-slate-300">{formatDollars(trade.dollarValue)}</span>
+                <span className={tradeSizeClass(trade.dollarValue)}>{formatDollars(trade.dollarValue)}</span>
                 <span className="text-slate-500">{odds}¢</span>
                 <span className="text-slate-600">{Number(trade.size).toFixed(1)} shares</span>
               </div>
@@ -776,9 +807,9 @@
               <Tooltip text={fullTimestamp(trade.timestamp)}>
                 <span className="text-[11px] font-mono text-slate-500">{timeAgo(trade.timestamp)}</span>
               </Tooltip>
-              {trade.transactionHash && (
-                <a href={`https://polygonscan.com/tx/${trade.transactionHash}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-slate-600 hover:text-slate-400 font-mono">
-                  tx
+              {trade.transactionHash && !trade.transactionHash.includes('-') && (
+                <a href={`https://polygonscan.com/tx/${trade.transactionHash}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-slate-600 hover:text-slate-400 font-mono flex items-center gap-1">
+                  <Icon name="ExternalLink" size={9} /> tx
                 </a>
               )}
             </div>
@@ -947,7 +978,7 @@
           <div className="ml-7 space-y-1.5">
             <div className="flex flex-wrap gap-1">
               {alert.wallets.map((name) => (
-                <span key={name} className="text-[10px] px-1.5 py-0 bg-navy-700 text-slate-300 rounded font-sans">{name}</span>
+                <span key={name} className="text-[10px] px-1.5 py-0 bg-navy-700 text-slate-300 rounded font-sans truncate max-w-[140px]" title={name}>{displayNickname(name)}</span>
               ))}
             </div>
             <div className="flex items-center gap-3 text-[11px] font-mono">
