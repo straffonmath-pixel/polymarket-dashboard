@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Polymarket Alpha Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            navy: { 900: '#0a0e17', 800: '#0f1422', 700: '#161d2e', 600: '#1e2740' },
+            accent: { green: '#00ff88', amber: '#ffaa00', red: '#ff4466' },
+          },
+          fontFamily: {
+            mono: ['JetBrains Mono', 'monospace'],
+            sans: ['DM Sans', 'sans-serif'],
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0a0e17; color: #e2e8f0; font-family: 'DM Sans', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0f1422; }
+    ::-webkit-scrollbar-thumb { background: #1e2740; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #2a3654; }
+    @keyframes slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+    .slide-in { animation: slideDown 0.3s ease-out; }
+    @keyframes pulse-green { 0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,136,0.4); } 50% { box-shadow: 0 0 0 4px rgba(0,255,136,0); } }
+    .pulse-dot { animation: pulse-green 2s infinite; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .fade-in { animation: fadeIn 0.2s ease-out; }
+    input[type="range"] { -webkit-appearance: none; height: 4px; background: #1e2740; border-radius: 2px; outline: none; }
+    input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; background: #00ff88; border-radius: 50%; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useReducer, useEffect, useRef, useCallback, useMemo, Fragment } = React;
+
+    // ─── Icons (inline SVG helpers) ───
+    const Icon = ({ name, size = 16, className = '' }) => {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current) {
+          ref.current.innerHTML = '';
+          const el = lucide.createElement(lucide.icons[name]);
+          el.setAttribute('width', size);
+          el.setAttribute('height', size);
+          if (className) el.setAttribute('class', className);
+          ref.current.appendChild(el);
+        }
+      }, [name, size, className]);
+      return <span ref={ref} className="inline-flex items-center" />;
+    };
+
+    // ─── Constants ───
+    const API_BASE = 'https://data-api.polymarket.com';
+    const CORS_PROXY = 'https://corsproxy.io/?';
+    const PRESET_TAGS = ['Politics', 'Sports', 'Macro', 'Crypto', 'Leaderboard'];
+    const TAG_COLORS = {
+      Politics: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+      Sports: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+      Macro: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
+      Crypto: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
+      Leaderboard: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+    };
+    const DEFAULT_TAG_COLOR = 'bg-slate-500/20 text-slate-400 border-slate-500/30';
+
+    // ─── Utilities ───
+    const formatAddress = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : '';
+    const formatDollars = (n) => {
+      if (n >= 1000) return `$${(n / 1000).toFixed(1)}k`;
+      return `$${n.toFixed(2)}`;
+    };
+    const timeAgo = (ts) => {
+      const seconds = Math.floor(Date.now() / 1000 - ts);
+      if (seconds < 60) return `${seconds}s ago`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+      return `${Math.floor(seconds / 86400)}d ago`;
+    };
+    const fullTimestamp = (ts) => new Date(ts * 1000).toLocaleString();
+    const timeWindowToSeconds = (w) => ({ '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 }[w] || 86400);
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const validateAddress = (addr) => /^0x[a-fA-F0-9]{40}$/.test(addr);
+    const getTagColor = (tag) => TAG_COLORS[tag] || DEFAULT_TAG_COLOR;
+
+    // ─── API Layer ───
+    let useProxy = false;
+
+    const apiFetch = async (path) => {
+      const url = useProxy ? `${CORS_PROXY}${encodeURIComponent(API_BASE + path)}` : `${API_BASE}${path}`;
+      const resp = await fetch(url);
+      if (resp.status === 429) {
+        const err = new Error('Rate limited');
+        err.status = 429;
+        throw err;
+      }
+      if (!resp.ok) {
+        const err = new Error(`API error: ${resp.status}`);
+        err.status = resp.status;
+        throw err;
+      }
+      return resp.json();
+    };
+
+    const fetchWithFallback = async (path) => {
+      try {
+        return await apiFetch(path);
+      } catch (e) {
+        if (!useProxy && (e.message === 'Failed to fetch' || e.name === 'TypeError')) {
+          useProxy = true;
+          return await apiFetch(path);
+        }
+        throw e;
+      }
+    };
+
+    const fetchTrades = (address, limit = 20) =>
+      fetchWithFallback(`/activity?user=${address}&type=TRADE&limit=${limit}&sortBy=TIMESTAMP&sortDirection=DESC`);
+
+    const LB_PERIOD_MAP = { '1d': 'DAY', '7d': 'WEEK', '30d': 'MONTH', 'all': 'ALL' };
+    const fetchLeaderboard = (window = 'all', limit = 20) =>
+      fetchWithFallback(`/v1/leaderboard?timePeriod=${LB_PERIOD_MAP[window] || 'ALL'}&orderBy=PNL&limit=${limit}`);
+
+    // ─── Market Status Cache (CLOB API) ───
+    const CLOB_API = 'https://clob.polymarket.com';
+    const marketStatusCache = {};  // conditionId → { closed: bool, endDate: str, fetchedAt: ts }
+    const MARKET_CACHE_TTL = 5 * 60 * 1000; // 5 min
+
+    const clobFetch = async (url) => {
+      try {
+        const res = await fetch(url);
+        if (res.ok) return await res.json();
+      } catch (_) { /* CORS or network fail — try proxy */ }
+      const proxied = `${CORS_PROXY}${encodeURIComponent(url)}`;
+      const res = await fetch(proxied);
+      if (!res.ok) return null;
+      return await res.json();
+    };
+
+    const fetchMarketStatuses = async (conditionIds) => {
+      const now = Date.now();
+      const uncached = conditionIds.filter((id) => {
+        const c = marketStatusCache[id];
+        return !c || (now - c.fetchedAt > MARKET_CACHE_TTL);
+      });
+      if (uncached.length === 0) return;
+
+      // CLOB API: GET /markets/{conditionId} returns exact market with closed + end_date_iso
+      await Promise.allSettled(uncached.map(async (cid) => {
+        try {
+          const data = await clobFetch(`${CLOB_API}/markets/${cid}`);
+          if (data && data.condition_id) {
+            marketStatusCache[cid] = {
+              closed: data.closed === true,
+              endDate: data.end_date_iso || null,
+              fetchedAt: now,
+            };
+          }
+        } catch (_) { /* silently skip — will retry next cycle */ }
+      }));
+    };
+
+    const isMarketExpired = (conditionId) => {
+      const c = marketStatusCache[conditionId];
+      if (!c) return false; // unknown = show it
+      if (c.closed) return true;
+      if (c.endDate) {
+        return new Date(c.endDate).getTime() < Date.now();
+      }
+      return false;
+    };
+
+    // ─── State Management ───
+    const initialState = {
+      wallets: [],
+      settings: { dollarThreshold: 50, refreshInterval: 60, tagFilter: [], sideFilter: 'ALL', timeWindow: '24h' },
+      activityFeed: [],
+      convergenceAlerts: [],
+      polling: { isPolling: false, lastPollAt: null, nextPollAt: null, progress: 0 },
+      leaderboard: { data: [], window: 'all', loading: false, error: null },
+      toasts: [],
+      errors: [],
+    };
+
+    function reducer(state, action) {
+      switch (action.type) {
+        case 'ADD_WALLET': {
+          if (state.wallets.find((w) => w.address.toLowerCase() === action.wallet.address.toLowerCase()))
+            return state;
+          return { ...state, wallets: [...state.wallets, { ...action.wallet, addedAt: Date.now() / 1000, lastTradeAt: null, recentTrades: [] }] };
+        }
+        case 'REMOVE_WALLET': {
+          const addr = action.address.toLowerCase();
+          return {
+            ...state,
+            wallets: state.wallets.filter((w) => w.address.toLowerCase() !== addr),
+            activityFeed: state.activityFeed.filter((t) => t.walletAddress.toLowerCase() !== addr),
+          };
+        }
+        case 'BULK_IMPORT': {
+          const existing = new Set(state.wallets.map((w) => w.address.toLowerCase()));
+          const newWallets = action.wallets.filter((w) => !existing.has(w.address.toLowerCase())).map((w) => ({ ...w, addedAt: Date.now() / 1000, lastTradeAt: null, recentTrades: [] }));
+          return { ...state, wallets: [...state.wallets, ...newWallets] };
+        }
+        case 'UPDATE_SETTINGS':
+          return { ...state, settings: { ...state.settings, ...action.settings } };
+        case 'ADD_TRADES': {
+          const newTrades = action.trades.filter((t) => !state.activityFeed.find((e) => e.transactionHash === t.transactionHash));
+          if (newTrades.length === 0) return state;
+          const feed = [...newTrades, ...state.activityFeed].sort((a, b) => b.timestamp - a.timestamp).slice(0, 2000);
+          // Update wallet lastTradeAt
+          const wallets = state.wallets.map((w) => {
+            const walletTrades = newTrades.filter((t) => t.walletAddress.toLowerCase() === w.address.toLowerCase());
+            if (walletTrades.length > 0) {
+              const maxTs = Math.max(...walletTrades.map((t) => t.timestamp));
+              return { ...w, lastTradeAt: Math.max(w.lastTradeAt || 0, maxTs) };
+            }
+            return w;
+          });
+          return { ...state, activityFeed: feed, wallets };
+        }
+        case 'SET_CONVERGENCE_ALERTS':
+          return { ...state, convergenceAlerts: action.alerts };
+        case 'SET_POLLING_STATUS':
+          return { ...state, polling: { ...state.polling, ...action.status } };
+        case 'SET_LEADERBOARD':
+          return { ...state, leaderboard: { ...state.leaderboard, ...action.data } };
+        case 'ADD_TOAST':
+          return { ...state, toasts: [...state.toasts, { id: Date.now(), ...action.toast }] };
+        case 'REMOVE_TOAST':
+          return { ...state, toasts: state.toasts.filter((t) => t.id !== action.id) };
+        case 'SET_ERROR':
+          return { ...state, errors: action.error ? [action.error, ...state.errors.slice(0, 4)] : [] };
+        case 'CLEAR_ERRORS':
+          return { ...state, errors: [] };
+        default:
+          return state;
+      }
+    }
+
+    // ─── Convergence Detection ───
+    async function detectConvergence(activityFeed, wallets, timeWindow) {
+      const cutoff = Date.now() / 1000 - timeWindowToSeconds(timeWindow);
+      const recentTrades = activityFeed.filter((t) => t.timestamp > cutoff);
+      const groups = {};
+      for (const trade of recentTrades) {
+        const key = `${trade.conditionId}::${trade.side}-${trade.outcome}`;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(trade);
+      }
+      const nickMap = {};
+      wallets.forEach((w) => { nickMap[w.address.toLowerCase()] = w.nickname; });
+      const alerts = [];
+      for (const [, trades] of Object.entries(groups)) {
+        const uniqueAddrs = [...new Set(trades.map((t) => t.walletAddress.toLowerCase()))];
+        if (uniqueAddrs.length >= 2) {
+          alerts.push({
+            conditionId: trades[0].conditionId,
+            title: trades[0].title,
+            slug: trades[0].slug,
+            direction: `${trades[0].side} ${trades[0].outcome}`,
+            wallets: uniqueAddrs.map((a) => nickMap[a] || formatAddress(a)),
+            totalAmount: trades.reduce((s, t) => s + t.dollarValue, 0),
+            tradeCount: trades.length,
+            firstTradeAt: Math.min(...trades.map((t) => t.timestamp)),
+            lastTradeAt: Math.max(...trades.map((t) => t.timestamp)),
+            strength: uniqueAddrs.length,
+          });
+        }
+      }
+
+      // Filter out expired/resolved markets
+      const uniqueConditionIds = [...new Set(alerts.map((a) => a.conditionId).filter(Boolean))];
+      if (uniqueConditionIds.length > 0) {
+        await fetchMarketStatuses(uniqueConditionIds);
+      }
+      const liveAlerts = alerts.filter((a) => !isMarketExpired(a.conditionId));
+
+      liveAlerts.sort((a, b) => b.strength - a.strength || b.totalAmount - a.totalAmount);
+      return liveAlerts;
+    }
+
+    // ─── Components ───
+
+    // Toast notifications
+    const Toasts = ({ toasts, dispatch }) => {
+      useEffect(() => {
+        toasts.forEach((t) => {
+          const timer = setTimeout(() => dispatch({ type: 'REMOVE_TOAST', id: t.id }), 3000);
+          return () => clearTimeout(timer);
+        });
+      }, [toasts]);
+      return (
+        <div className="fixed top-4 right-4 z-50 flex flex-col gap-2">
+          {toasts.map((t) => (
+            <div key={t.id} className="fade-in bg-navy-700 border border-accent-green/30 text-accent-green px-4 py-2 rounded-lg font-sans text-sm shadow-lg">
+              {t.message}
+            </div>
+          ))}
+        </div>
+      );
+    };
+
+    // Error banner
+    const ErrorBanner = ({ errors, dispatch }) => {
+      if (errors.length === 0) return null;
+      return (
+        <div className="bg-accent-red/10 border-b border-accent-red/30 px-4 py-2 flex items-center justify-between">
+          <div className="text-accent-red text-sm font-sans flex items-center gap-2">
+            <Icon name="AlertTriangle" size={14} />
+            <span>{errors[0]}</span>
+          </div>
+          <button onClick={() => dispatch({ type: 'CLEAR_ERRORS' })} className="text-accent-red/60 hover:text-accent-red text-xs">
+            Dismiss
+          </button>
+        </div>
+      );
+    };
+
+    // Tag pill
+    const TagPill = ({ tag, small, onClick, active }) => (
+      <span
+        onClick={onClick}
+        className={`inline-flex items-center border rounded-full font-sans font-medium ${small ? 'text-[10px] px-1.5 py-0' : 'text-xs px-2 py-0.5'} ${getTagColor(tag)} ${onClick ? 'cursor-pointer' : ''} ${active === false ? 'opacity-40' : ''}`}
+      >
+        {tag}
+      </span>
+    );
+
+    // Confirm dialog
+    const ConfirmDialog = ({ message, onConfirm, onCancel }) => (
+      <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center fade-in" onClick={onCancel}>
+        <div className="bg-navy-700 border border-navy-600 rounded-xl p-6 max-w-sm mx-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <p className="text-slate-200 font-sans text-sm mb-4">{message}</p>
+          <div className="flex gap-3 justify-end">
+            <button onClick={onCancel} className="px-3 py-1.5 text-sm font-sans text-slate-400 hover:text-slate-200 transition">Cancel</button>
+            <button onClick={onConfirm} className="px-3 py-1.5 text-sm font-sans bg-accent-red/20 text-accent-red border border-accent-red/30 rounded-lg hover:bg-accent-red/30 transition">Remove</button>
+          </div>
+        </div>
+      </div>
+    );
+
+    // Modal wrapper
+    const Modal = ({ title, onClose, children }) => (
+      <div className="fixed inset-0 bg-black/60 z-40 flex items-center justify-center fade-in" onClick={onClose}>
+        <div className="bg-navy-800 border border-navy-600 rounded-xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between px-5 py-3 border-b border-navy-600">
+            <h3 className="font-sans font-semibold text-slate-200">{title}</h3>
+            <button onClick={onClose} className="text-slate-500 hover:text-slate-300"><Icon name="X" size={18} /></button>
+          </div>
+          <div className="flex-1 overflow-auto p-5">{children}</div>
+        </div>
+      </div>
+    );
+
+    // Tooltip
+    const Tooltip = ({ text, children }) => (
+      <span className="relative group">
+        {children}
+        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 text-[11px] font-sans bg-navy-600 text-slate-300 rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition pointer-events-none z-30 border border-navy-600">
+          {text}
+        </span>
+      </span>
+    );
+
+    // ─── Add Wallet Form ───
+    const AddWalletForm = ({ dispatch, wallets }) => {
+      const [address, setAddress] = useState('');
+      const [nickname, setNickname] = useState('');
+      const [tags, setTags] = useState([]);
+      const [customTag, setCustomTag] = useState('');
+      const [error, setError] = useState('');
+
+      const handleAdd = () => {
+        setError('');
+        if (!validateAddress(address)) { setError('Invalid address. Must be 0x + 40 hex characters.'); return; }
+        if (!nickname.trim()) { setError('Nickname is required.'); return; }
+        if (wallets.find((w) => w.address.toLowerCase() === address.toLowerCase())) { setError('This wallet is already in your watchlist.'); return; }
+        dispatch({ type: 'ADD_WALLET', wallet: { address, nickname: nickname.trim(), tags } });
+        dispatch({ type: 'ADD_TOAST', toast: { message: `Added ${nickname.trim()} to watchlist` } });
+        setAddress(''); setNickname(''); setTags([]);
+      };
+
+      const toggleTag = (tag) => setTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
+      const addCustomTag = () => {
+        if (customTag.trim() && !tags.includes(customTag.trim())) {
+          setTags((prev) => [...prev, customTag.trim()]);
+          setCustomTag('');
+        }
+      };
+
+      return (
+        <div className="p-3 space-y-2.5">
+          <div>
+            <label className="text-[11px] uppercase tracking-wider text-slate-500 font-sans font-medium">Wallet Address</label>
+            <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="0x..." className="mt-1 w-full bg-navy-900 border border-navy-600 rounded-lg px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-accent-green/50" />
+          </div>
+          <div>
+            <label className="text-[11px] uppercase tracking-wider text-slate-500 font-sans font-medium">Nickname</label>
+            <input value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="e.g. Election Whale" className="mt-1 w-full bg-navy-900 border border-navy-600 rounded-lg px-3 py-2 text-sm font-sans text-slate-200 placeholder-slate-600 focus:outline-none focus:border-accent-green/50" />
+          </div>
+          <div>
+            <label className="text-[11px] uppercase tracking-wider text-slate-500 font-sans font-medium">Tags</label>
+            <div className="flex flex-wrap gap-1.5 mt-1.5">
+              {PRESET_TAGS.map((tag) => (
+                <button key={tag} onClick={() => toggleTag(tag)} className={`text-[11px] px-2 py-0.5 rounded-full border font-sans transition ${tags.includes(tag) ? getTagColor(tag) : 'border-navy-600 text-slate-500 hover:text-slate-300'}`}>
+                  {tag}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1.5 mt-1.5">
+              <input value={customTag} onChange={(e) => setCustomTag(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addCustomTag()} placeholder="Custom tag..." className="flex-1 bg-navy-900 border border-navy-600 rounded-lg px-2 py-1 text-xs font-sans text-slate-200 placeholder-slate-600 focus:outline-none focus:border-accent-green/50" />
+              <button onClick={addCustomTag} className="text-xs text-accent-green/70 hover:text-accent-green px-1">+</button>
+            </div>
+            {tags.filter((t) => !PRESET_TAGS.includes(t)).length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {tags.filter((t) => !PRESET_TAGS.includes(t)).map((t) => (
+                  <span key={t} className="text-[10px] px-1.5 py-0 bg-slate-500/20 text-slate-400 border border-slate-500/30 rounded-full font-sans flex items-center gap-1">
+                    {t}
+                    <button onClick={() => toggleTag(t)} className="text-slate-500 hover:text-slate-300">&times;</button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+          {error && <p className="text-accent-red text-xs font-sans">{error}</p>}
+          <button onClick={handleAdd} className="w-full bg-accent-green/10 text-accent-green border border-accent-green/30 rounded-lg py-2 text-sm font-sans font-medium hover:bg-accent-green/20 transition flex items-center justify-center gap-2">
+            <Icon name="Plus" size={14} /> Add Wallet
+          </button>
+        </div>
+      );
+    };
+
+    // ─── Wallet Card ───
+    const WalletCard = ({ wallet, dispatch }) => {
+      const [confirm, setConfirm] = useState(false);
+      const [copied, setCopied] = useState(false);
+      const isActive = wallet.lastTradeAt && (Date.now() / 1000 - wallet.lastTradeAt) < 3600;
+
+      const copyAddress = () => {
+        navigator.clipboard.writeText(wallet.address).catch(() => {});
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      };
+
+      return (
+        <div className="px-3 py-2.5 border-b border-navy-700/50 hover:bg-navy-700/30 transition group">
+          {confirm && (
+            <ConfirmDialog message={`Remove ${wallet.nickname} from watchlist?`} onConfirm={() => { dispatch({ type: 'REMOVE_WALLET', address: wallet.address }); dispatch({ type: 'ADD_TOAST', toast: { message: `Removed ${wallet.nickname}` } }); }} onCancel={() => setConfirm(false)} />
+          )}
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isActive ? 'bg-accent-green pulse-dot' : 'bg-slate-600'}`} />
+              <a href={`https://polymarket.com/profile/${wallet.address}`} target="_blank" rel="noopener noreferrer" className="font-sans font-medium text-sm text-slate-200 truncate hover:text-accent-green transition">{wallet.nickname}</a>
+            </div>
+            <button onClick={() => setConfirm(true)} className="text-slate-600 hover:text-accent-red opacity-0 group-hover:opacity-100 transition flex-shrink-0">
+              <Icon name="Trash2" size={13} />
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5 mt-1 ml-4">
+            <span className="font-mono text-[11px] text-slate-500">{formatAddress(wallet.address)}</span>
+            <button onClick={copyAddress} className="text-slate-600 hover:text-slate-300 transition">
+              <Icon name={copied ? 'Check' : 'Copy'} size={11} />
+            </button>
+          </div>
+          {wallet.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1.5 ml-4">
+              {wallet.tags.map((tag) => <TagPill key={tag} tag={tag} small />)}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ─── Wallet List ───
+    const WalletList = ({ wallets, dispatch }) => {
+      const [search, setSearch] = useState('');
+      const [tagFilter, setTagFilter] = useState(null);
+      const [sort, setSort] = useState('recent');
+
+      const allTags = useMemo(() => {
+        const s = new Set();
+        wallets.forEach((w) => w.tags.forEach((t) => s.add(t)));
+        return [...s];
+      }, [wallets]);
+
+      const filtered = useMemo(() => {
+        let list = wallets;
+        if (search) list = list.filter((w) => w.nickname.toLowerCase().includes(search.toLowerCase()));
+        if (tagFilter) list = list.filter((w) => w.tags.includes(tagFilter));
+        if (sort === 'recent') list = [...list].sort((a, b) => (b.lastTradeAt || 0) - (a.lastTradeAt || 0));
+        else if (sort === 'alpha') list = [...list].sort((a, b) => a.nickname.localeCompare(b.nickname));
+        else if (sort === 'added') list = [...list].sort((a, b) => b.addedAt - a.addedAt);
+        return list;
+      }, [wallets, search, tagFilter, sort]);
+
+      return (
+        <div>
+          <div className="px-3 py-2 border-b border-navy-700/50">
+            <div className="relative">
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search wallets..." className="w-full bg-navy-900 border border-navy-600 rounded-lg pl-8 pr-3 py-1.5 text-xs font-sans text-slate-200 placeholder-slate-600 focus:outline-none focus:border-accent-green/50" />
+              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-600"><Icon name="Search" size={12} /></span>
+            </div>
+            {allTags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                <button onClick={() => setTagFilter(null)} className={`text-[10px] px-1.5 py-0 rounded-full border font-sans ${!tagFilter ? 'border-accent-green/40 text-accent-green' : 'border-navy-600 text-slate-500'}`}>All</button>
+                {allTags.map((tag) => (
+                  <button key={tag} onClick={() => setTagFilter(tagFilter === tag ? null : tag)} className={`text-[10px] px-1.5 py-0 rounded-full border font-sans transition ${tagFilter === tag ? getTagColor(tag) : 'border-navy-600 text-slate-500'}`}>
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-1 mt-2">
+              {[['recent', 'Recent'], ['alpha', 'A-Z'], ['added', 'Newest']].map(([k, l]) => (
+                <button key={k} onClick={() => setSort(k)} className={`text-[10px] px-1.5 py-0 rounded font-sans ${sort === k ? 'text-accent-green bg-accent-green/10' : 'text-slate-500 hover:text-slate-300'}`}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 480px)' }}>
+            {filtered.length === 0 && (
+              <p className="text-slate-600 text-xs font-sans text-center py-4">
+                {wallets.length === 0 ? 'No wallets added yet' : 'No wallets match filters'}
+              </p>
+            )}
+            {filtered.map((w) => <WalletCard key={w.address} wallet={w} dispatch={dispatch} />)}
+          </div>
+          <div className="px-3 py-1.5 border-t border-navy-700/50">
+            <span className="text-[10px] text-slate-600 font-sans">{wallets.length} wallet{wallets.length !== 1 ? 's' : ''} tracked</span>
+          </div>
+        </div>
+      );
+    };
+
+    // ─── Bulk Import Modal ───
+    const BulkImportModal = ({ onClose, dispatch, wallets }) => {
+      const [text, setText] = useState('');
+      const [result, setResult] = useState(null);
+
+      const handleImport = () => {
+        const lines = text.trim().split('\n').filter((l) => l.trim());
+        const parsed = [];
+        const errors = [];
+        lines.forEach((line, i) => {
+          const parts = line.split(',').map((s) => s.trim());
+          if (parts.length < 2) { errors.push(`Line ${i + 1}: needs address and nickname`); return; }
+          const [address, nickname, tagStr] = parts;
+          if (!validateAddress(address)) { errors.push(`Line ${i + 1}: invalid address`); return; }
+          const tags = tagStr ? tagStr.split('|').map((t) => t.trim()).filter(Boolean) : [];
+          parsed.push({ address, nickname, tags });
+        });
+        if (parsed.length > 0) {
+          dispatch({ type: 'BULK_IMPORT', wallets: parsed });
+          dispatch({ type: 'ADD_TOAST', toast: { message: `Imported ${parsed.length} wallet${parsed.length > 1 ? 's' : ''}` } });
+        }
+        setResult({ added: parsed.length, errors });
+      };
+
+      return (
+        <Modal title="Bulk Import Wallets" onClose={onClose}>
+          <p className="text-slate-400 text-xs font-sans mb-3">
+            Paste one wallet per line: <code className="font-mono text-slate-300">address, nickname, tag1|tag2</code>
+          </p>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={8} placeholder={"0xabc123..., Election Whale, Politics|Leaderboard\n0xdef456..., Crypto Bot 1, Crypto"} className="w-full bg-navy-900 border border-navy-600 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-accent-green/50 resize-none" />
+          {result && (
+            <div className="mt-3 space-y-1">
+              <p className="text-accent-green text-xs font-sans">{result.added} wallet{result.added !== 1 ? 's' : ''} imported</p>
+              {result.errors.map((e, i) => <p key={i} className="text-accent-red text-xs font-sans">{e}</p>)}
+            </div>
+          )}
+          <div className="flex justify-end gap-2 mt-4">
+            <button onClick={onClose} className="px-3 py-1.5 text-sm font-sans text-slate-400 hover:text-slate-200 transition">Cancel</button>
+            <button onClick={handleImport} disabled={!text.trim()} className="px-4 py-1.5 text-sm font-sans bg-accent-green/10 text-accent-green border border-accent-green/30 rounded-lg hover:bg-accent-green/20 transition disabled:opacity-30">
+              Import
+            </button>
+          </div>
+        </Modal>
+      );
+    };
+
+    // ─── Leaderboard Section ───
+    const LeaderboardSection = ({ state, dispatch }) => {
+      const [open, setOpen] = useState(false);
+      const { data, window: lbWindow, loading, error } = state.leaderboard;
+
+      const load = useCallback(async (w) => {
+        dispatch({ type: 'SET_LEADERBOARD', data: { loading: true, error: null, window: w } });
+        try {
+          const result = await fetchLeaderboard(w, 20);
+          dispatch({ type: 'SET_LEADERBOARD', data: { data: Array.isArray(result) ? result : [], loading: false } });
+        } catch (e) {
+          dispatch({ type: 'SET_LEADERBOARD', data: { loading: false, error: e.message } });
+        }
+      }, [dispatch]);
+
+      useEffect(() => { if (open && data.length === 0 && !loading) load(lbWindow); }, [open]);
+
+      const addFromLeaderboard = (entry) => {
+        const address = entry.proxyWallet || entry.userAddress || entry.address || '';
+        const name = entry.userName || entry.name || entry.username || formatAddress(address);
+        if (!address || !validateAddress(address)) {
+          dispatch({ type: 'ADD_TOAST', toast: { message: 'Invalid address from leaderboard' } });
+          return;
+        }
+        if (state.wallets.find((w) => w.address.toLowerCase() === address.toLowerCase())) {
+          dispatch({ type: 'ADD_TOAST', toast: { message: `${name} already in watchlist` } });
+          return;
+        }
+        dispatch({ type: 'ADD_WALLET', wallet: { address, nickname: name, tags: ['Leaderboard'] } });
+        dispatch({ type: 'ADD_TOAST', toast: { message: `Added ${name}` } });
+      };
+
+      return (
+        <div className="border-t border-navy-700/50">
+          <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-3 py-2 text-xs font-sans text-slate-400 hover:text-slate-200 transition">
+            <span className="flex items-center gap-1.5"><Icon name="Trophy" size={13} /> Leaderboard Discovery</span>
+            <Icon name={open ? 'ChevronUp' : 'ChevronDown'} size={13} />
+          </button>
+          {open && (
+            <div className="px-3 pb-3 slide-in">
+              <div className="flex gap-1 mb-2">
+                {[['1d', '1D'], ['7d', '7D'], ['30d', '30D'], ['all', 'All']].map(([w, l]) => (
+                  <button key={w} onClick={() => load(w)} className={`text-[10px] px-2 py-0.5 rounded font-sans transition ${lbWindow === w ? 'bg-accent-amber/10 text-accent-amber border border-accent-amber/30' : 'text-slate-500 border border-navy-600 hover:text-slate-300'}`}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+              {loading && (
+                <div className="space-y-1.5">
+                  {[...Array(5)].map((_, i) => <div key={i} className="h-8 bg-navy-700/50 rounded animate-pulse" />)}
+                </div>
+              )}
+              {error && <p className="text-accent-red text-xs font-sans">{error}</p>}
+              {!loading && data.length > 0 && (
+                <div className="space-y-1 max-h-60 overflow-y-auto">
+                  {data.map((entry, i) => {
+                    const addr = entry.proxyWallet || entry.userAddress || entry.address || '';
+                    const name = entry.userName || entry.name || entry.username || formatAddress(addr);
+                    const profit = entry.pnl || entry.profit || 0;
+                    const volume = entry.vol || entry.volume || 0;
+                    const isAdded = state.wallets.some((w) => w.address.toLowerCase() === addr.toLowerCase());
+                    return (
+                      <div key={i} className="flex items-center gap-2 py-1.5 px-2 rounded bg-navy-700/30 hover:bg-navy-700/50 transition">
+                        <span className="text-[10px] font-mono text-slate-600 w-5">#{i + 1}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-sans text-slate-200 truncate">{name}</div>
+                          <div className="flex gap-2 text-[10px] font-mono">
+                            <span className={profit >= 0 ? 'text-accent-green' : 'text-accent-red'}>{formatDollars(Math.abs(profit))}</span>
+                            <span className="text-slate-600">vol: {formatDollars(volume)}</span>
+                          </div>
+                        </div>
+                        <button onClick={() => addFromLeaderboard(entry)} disabled={isAdded || !validateAddress(addr)} className={`flex-shrink-0 text-xs px-2 py-0.5 rounded font-sans transition ${isAdded ? 'text-slate-600 border border-navy-600' : 'text-accent-green border border-accent-green/30 hover:bg-accent-green/10'}`}>
+                          {isAdded ? 'Added' : '+'}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {!loading && !error && data.length === 0 && <p className="text-slate-600 text-xs font-sans">No leaderboard data</p>}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ─── Left Panel (Sidebar) ───
+    const LeftPanel = ({ state, dispatch, collapsed, setCollapsed }) => {
+      const [showBulk, setShowBulk] = useState(false);
+
+      return (
+        <Fragment>
+          {showBulk && <BulkImportModal onClose={() => setShowBulk(false)} dispatch={dispatch} wallets={state.wallets} />}
+          <div className={`${collapsed ? 'w-12' : 'w-[300px]'} flex-shrink-0 border-r border-navy-700/50 bg-navy-800 flex flex-col transition-all duration-200 h-screen overflow-hidden`}>
+            {collapsed ? (
+              <div className="flex flex-col items-center py-3">
+                <button onClick={() => setCollapsed(false)} className="text-slate-500 hover:text-slate-300 p-2">
+                  <Icon name="PanelLeftOpen" size={16} />
+                </button>
+              </div>
+            ) : (
+              <Fragment>
+                <div className="flex items-center justify-between px-3 py-2.5 border-b border-navy-700/50">
+                  <h2 className="font-sans font-semibold text-sm text-slate-200 flex items-center gap-2">
+                    <Icon name="Eye" size={14} /> Watchlist
+                  </h2>
+                  <button onClick={() => setCollapsed(true)} className="text-slate-500 hover:text-slate-300">
+                    <Icon name="PanelLeftClose" size={14} />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto">
+                  <AddWalletForm dispatch={dispatch} wallets={state.wallets} />
+                  <div className="px-3 pb-2">
+                    <button onClick={() => setShowBulk(true)} className="w-full text-[11px] font-sans text-slate-500 hover:text-slate-300 border border-dashed border-navy-600 rounded-lg py-1.5 hover:border-slate-500 transition flex items-center justify-center gap-1.5">
+                      <Icon name="Upload" size={11} /> Bulk Import
+                    </button>
+                  </div>
+                  <div className="border-t border-navy-700/50">
+                    <WalletList wallets={state.wallets} dispatch={dispatch} />
+                  </div>
+                  <LeaderboardSection state={state} dispatch={dispatch} />
+                </div>
+              </Fragment>
+            )}
+          </div>
+        </Fragment>
+      );
+    };
+
+    // ─── Trade Card ───
+    const TradeCard = ({ trade }) => {
+      const isBuy = trade.side === 'BUY';
+      const directionLabel = `${trade.side} ${trade.outcome}`;
+      const odds = Math.round(trade.price * 100);
+      const marketUrl = trade.slug ? `https://polymarket.com/event/${trade.slug}` : null;
+
+      return (
+        <div className="slide-in px-4 py-3 border-b border-navy-700/30 hover:bg-navy-700/20 transition">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-sans font-medium text-sm text-slate-200">{trade.walletNickname}</span>
+                {trade.walletTags?.[0] && <TagPill tag={trade.walletTags[0]} small />}
+              </div>
+              <div className="text-sm font-sans text-slate-300 mb-1.5 leading-snug">
+                {marketUrl ? (
+                  <a href={marketUrl} target="_blank" rel="noopener noreferrer" className="hover:text-accent-green transition">{trade.title || 'Unknown Market'}</a>
+                ) : (trade.title || 'Unknown Market')}
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
+                <span className={`font-semibold ${isBuy ? 'text-accent-green' : 'text-accent-red'}`}>{directionLabel}</span>
+                <span className="text-slate-300">{formatDollars(trade.dollarValue)}</span>
+                <span className="text-slate-500">{odds}¢</span>
+                <span className="text-slate-600">{Number(trade.size).toFixed(1)} shares</span>
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-1 flex-shrink-0">
+              <Tooltip text={fullTimestamp(trade.timestamp)}>
+                <span className="text-[11px] font-mono text-slate-500">{timeAgo(trade.timestamp)}</span>
+              </Tooltip>
+              {trade.transactionHash && (
+                <a href={`https://polygonscan.com/tx/${trade.transactionHash}`} target="_blank" rel="noopener noreferrer" className="text-[10px] text-slate-600 hover:text-slate-400 font-mono">
+                  tx
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ─── Center Panel (Activity Feed) ───
+    const CenterPanel = ({ state, dispatch, onRefresh }) => {
+      const { settings, activityFeed, polling } = state;
+      const [countdown, setCountdown] = useState(settings.refreshInterval);
+
+      useEffect(() => {
+        const interval = setInterval(() => {
+          if (polling.nextPollAt) {
+            const remaining = Math.max(0, Math.round(polling.nextPollAt / 1000 - Date.now() / 1000));
+            setCountdown(remaining);
+          }
+        }, 1000);
+        return () => clearInterval(interval);
+      }, [polling.nextPollAt]);
+
+      const filteredFeed = useMemo(() => {
+        const cutoff = Date.now() / 1000 - timeWindowToSeconds(settings.timeWindow);
+        return activityFeed.filter((t) => {
+          if (t.timestamp < cutoff) return false;
+          if (t.dollarValue < settings.dollarThreshold) return false;
+          if (settings.sideFilter !== 'ALL' && t.side !== settings.sideFilter) return false;
+          if (settings.tagFilter.length > 0) {
+            if (!t.walletTags?.some((tag) => settings.tagFilter.includes(tag))) return false;
+          }
+          return true;
+        });
+      }, [activityFeed, settings]);
+
+      const allTags = useMemo(() => {
+        const s = new Set();
+        state.wallets.forEach((w) => w.tags.forEach((t) => s.add(t)));
+        return [...s];
+      }, [state.wallets]);
+
+      return (
+        <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
+          {/* Header */}
+          <div className="px-4 py-2.5 border-b border-navy-700/50 flex items-center justify-between bg-navy-800">
+            <h2 className="font-sans font-semibold text-sm text-slate-200 flex items-center gap-2">
+              <Icon name="Activity" size={14} /> Activity Feed
+            </h2>
+            <div className="flex items-center gap-3">
+              {polling.isPolling && (
+                <div className="flex items-center gap-2">
+                  <div className="w-20 h-1 bg-navy-700 rounded-full overflow-hidden">
+                    <div className="h-full bg-accent-green/50 transition-all duration-300 rounded-full" style={{ width: `${polling.progress}%` }} />
+                  </div>
+                  <span className="text-[10px] font-mono text-slate-500">{Math.round(polling.progress)}%</span>
+                </div>
+              )}
+              {!polling.isPolling && polling.lastPollAt && (
+                <span className="text-[10px] font-mono text-slate-500">Updated {timeAgo(polling.lastPollAt / 1000)}</span>
+              )}
+              {!polling.isPolling && (
+                <span className="text-[10px] font-mono text-slate-600">{countdown}s</span>
+              )}
+              <button onClick={onRefresh} disabled={polling.isPolling || state.wallets.length === 0} className="text-xs font-sans text-accent-green border border-accent-green/30 rounded px-2 py-0.5 hover:bg-accent-green/10 transition disabled:opacity-30 flex items-center gap-1">
+                <Icon name="RefreshCw" size={11} /> Refresh
+              </button>
+            </div>
+          </div>
+
+          {/* Filters */}
+          <div className="px-4 py-2 border-b border-navy-700/30 space-y-2 bg-navy-800/50">
+            <div className="flex items-center gap-4 flex-wrap">
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] uppercase tracking-wider text-slate-500 font-sans">Min $</label>
+                <input type="range" min={1} max={10000} step={1} value={settings.dollarThreshold} onChange={(e) => dispatch({ type: 'UPDATE_SETTINGS', settings: { dollarThreshold: Number(e.target.value) } })} className="w-20" />
+                <span className="font-mono text-xs text-slate-300 w-14">{formatDollars(settings.dollarThreshold)}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                {['ALL', 'BUY', 'SELL'].map((s) => (
+                  <button key={s} onClick={() => dispatch({ type: 'UPDATE_SETTINGS', settings: { sideFilter: s } })} className={`text-[10px] px-2 py-0.5 rounded font-sans transition ${settings.sideFilter === s ? (s === 'BUY' ? 'bg-accent-green/10 text-accent-green' : s === 'SELL' ? 'bg-accent-red/10 text-accent-red' : 'bg-slate-500/10 text-slate-300') : 'text-slate-500 hover:text-slate-300'}`}>
+                    {s === 'ALL' ? 'All' : s === 'BUY' ? 'Buys' : 'Sells'}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1">
+                {[['1h', '1H'], ['6h', '6H'], ['24h', '24H'], ['7d', '7D']].map(([w, l]) => (
+                  <button key={w} onClick={() => dispatch({ type: 'UPDATE_SETTINGS', settings: { timeWindow: w } })} className={`text-[10px] px-2 py-0.5 rounded font-sans transition ${settings.timeWindow === w ? 'bg-accent-amber/10 text-accent-amber' : 'text-slate-500 hover:text-slate-300'}`}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {allTags.length > 0 && (
+              <div className="flex items-center gap-1 flex-wrap">
+                <span className="text-[10px] text-slate-600 font-sans mr-1">Tags:</span>
+                {allTags.map((tag) => {
+                  const active = settings.tagFilter.includes(tag);
+                  return (
+                    <button key={tag} onClick={() => {
+                      const tf = active ? settings.tagFilter.filter((t) => t !== tag) : [...settings.tagFilter, tag];
+                      dispatch({ type: 'UPDATE_SETTINGS', settings: { tagFilter: tf } });
+                    }} className={`text-[10px] px-1.5 py-0 rounded-full border font-sans transition ${active ? getTagColor(tag) : 'border-navy-600 text-slate-500 hover:text-slate-300'}`}>
+                      {tag}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Feed */}
+          <div className="flex-1 overflow-y-auto">
+            {state.wallets.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-center px-8">
+                <div className="w-16 h-16 rounded-full bg-navy-700/50 flex items-center justify-center mb-4">
+                  <Icon name="Radar" size={28} className="text-slate-600" />
+                </div>
+                <h3 className="font-sans font-semibold text-slate-300 mb-2">Add wallets to start tracking</h3>
+                <p className="font-sans text-xs text-slate-500 max-w-xs">
+                  Use the sidebar to add Polymarket wallet addresses, or browse the leaderboard to discover top traders.
+                </p>
+              </div>
+            ) : filteredFeed.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-64 text-center px-8">
+                <Icon name="Inbox" size={28} className="text-slate-600 mb-3" />
+                <p className="font-sans text-sm text-slate-500">No trades match current filters</p>
+                <p className="font-sans text-xs text-slate-600 mt-1">Try lowering the dollar threshold or expanding the time window</p>
+              </div>
+            ) : (
+              filteredFeed.map((trade) => <TradeCard key={trade.transactionHash || `${trade.walletAddress}-${trade.timestamp}`} trade={trade} />)
+            )}
+          </div>
+
+          {/* Feed count */}
+          {filteredFeed.length > 0 && (
+            <div className="px-4 py-1 border-t border-navy-700/30 bg-navy-800/50">
+              <span className="text-[10px] font-mono text-slate-600">{filteredFeed.length} trade{filteredFeed.length !== 1 ? 's' : ''}</span>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ─── Convergence Alert Card ───
+    const ConvergenceCard = ({ alert }) => {
+      const isBuy = alert.direction.startsWith('BUY');
+      const marketUrl = alert.slug ? `https://polymarket.com/event/${alert.slug}` : null;
+      const strengthLabel = alert.strength >= 3 ? 'Strong' : 'Moderate';
+
+      return (
+        <div className="slide-in mx-3 mb-3 p-3 rounded-xl border border-accent-amber/20 bg-accent-amber/5">
+          <div className="flex items-start gap-2 mb-2">
+            <span className="text-lg mt-0.5">🔥</span>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-sans font-medium text-slate-200 leading-snug mb-1">
+                {marketUrl ? (
+                  <a href={marketUrl} target="_blank" rel="noopener noreferrer" className="hover:text-accent-amber transition">{alert.title || 'Unknown Market'}</a>
+                ) : (alert.title || 'Unknown Market')}
+              </div>
+              <span className={`text-xs font-mono font-semibold ${isBuy ? 'text-accent-green' : 'text-accent-red'}`}>
+                {alert.strength} wallet{alert.strength > 1 ? 's' : ''} {alert.direction.toLowerCase()}
+              </span>
+            </div>
+          </div>
+          <div className="ml-7 space-y-1.5">
+            <div className="flex flex-wrap gap-1">
+              {alert.wallets.map((name) => (
+                <span key={name} className="text-[10px] px-1.5 py-0 bg-navy-700 text-slate-300 rounded font-sans">{name}</span>
+              ))}
+            </div>
+            <div className="flex items-center gap-3 text-[11px] font-mono">
+              <span className="text-slate-300">{formatDollars(alert.totalAmount)} total</span>
+              <span className="text-slate-500">{alert.tradeCount} trade{alert.tradeCount > 1 ? 's' : ''}</span>
+              <span className={`px-1 py-0 rounded text-[10px] font-sans ${alert.strength >= 3 ? 'bg-accent-amber/20 text-accent-amber' : 'bg-slate-500/20 text-slate-400'}`}>
+                {strengthLabel}
+              </span>
+            </div>
+            <div className="text-[10px] font-mono text-slate-600">
+              {timeAgo(alert.firstTradeAt)} — {timeAgo(alert.lastTradeAt)}
+            </div>
+            {marketUrl && (
+              <a href={marketUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[11px] font-sans text-accent-amber hover:text-accent-amber/80 transition mt-1">
+                View Market <Icon name="ExternalLink" size={10} />
+              </a>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    // ─── Right Panel (Convergence Alerts) ───
+    const RightPanel = ({ state }) => {
+      const [showInfo, setShowInfo] = useState(false);
+
+      return (
+        <div className="w-[340px] flex-shrink-0 border-l border-navy-700/50 bg-navy-800 flex flex-col h-screen overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-navy-700/50 flex items-center justify-between">
+            <h2 className="font-sans font-semibold text-sm text-accent-amber flex items-center gap-2">
+              <Icon name="Zap" size={14} /> Convergence Alerts
+            </h2>
+            <Tooltip text="When 2+ watched wallets bet the same direction on the same market, a convergence alert fires. This can signal high-conviction opportunities.">
+              <button onClick={() => setShowInfo(!showInfo)} className="text-slate-500 hover:text-slate-300">
+                <Icon name="HelpCircle" size={14} />
+              </button>
+            </Tooltip>
+          </div>
+          {showInfo && (
+            <div className="px-4 py-2 border-b border-navy-700/30 bg-accent-amber/5 slide-in">
+              <p className="text-xs font-sans text-slate-300 leading-relaxed">
+                <strong>Convergence</strong> = multiple wallets independently betting the same direction on the same market.
+                This is a high-signal indicator that sharp traders agree on an outcome. Stronger convergence (more wallets) = higher confidence.
+              </p>
+            </div>
+          )}
+          <div className="flex-1 overflow-y-auto py-3">
+            {state.convergenceAlerts.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-center px-6">
+                <Icon name="Radar" size={28} className="text-slate-600 mb-3" />
+                <p className="font-sans text-sm text-slate-500 mb-1">No convergence detected</p>
+                <p className="font-sans text-xs text-slate-600">Try expanding the time window or adding more wallets to your watchlist</p>
+              </div>
+            ) : (
+              state.convergenceAlerts.map((alert, i) => <ConvergenceCard key={`${alert.conditionId}-${alert.direction}-${i}`} alert={alert} />)
+            )}
+          </div>
+          <div className="px-4 py-1.5 border-t border-navy-700/30">
+            <span className="text-[10px] font-mono text-slate-600">
+              {state.convergenceAlerts.length} alert{state.convergenceAlerts.length !== 1 ? 's' : ''}
+              {' · '}{state.settings.timeWindow} window
+            </span>
+          </div>
+        </div>
+      );
+    };
+
+    // ─── Mobile Layout ───
+    const MobileNav = ({ tab, setTab }) => (
+      <div className="flex border-b border-navy-700/50 bg-navy-800 sticky top-0 z-20">
+        {[['wallets', 'Eye', 'Wallets'], ['feed', 'Activity', 'Feed'], ['alerts', 'Zap', 'Alerts']].map(([k, icon, label]) => (
+          <button key={k} onClick={() => setTab(k)} className={`flex-1 py-2.5 text-xs font-sans flex items-center justify-center gap-1.5 transition ${tab === k ? 'text-accent-green border-b-2 border-accent-green' : 'text-slate-500'}`}>
+            <Icon name={icon} size={14} /> {label}
+          </button>
+        ))}
+      </div>
+    );
+
+    // ─── Main App ───
+    const App = () => {
+      const [state, dispatch] = useReducer(reducer, initialState);
+      const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+      const [mobileTab, setMobileTab] = useState('feed');
+      const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
+      const pollTimerRef = useRef(null);
+      const pollInProgressRef = useRef(false);
+
+      useEffect(() => {
+        const handleResize = () => setIsMobile(window.innerWidth < 1024);
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+      }, []);
+
+      // ─── Polling Logic ───
+      const runPollCycle = useCallback(async () => {
+        if (state.wallets.length === 0 || pollInProgressRef.current) return;
+        pollInProgressRef.current = true;
+        dispatch({ type: 'SET_POLLING_STATUS', status: { isPolling: true, progress: 0 } });
+
+        const BATCH_SIZE = 5;
+        const BATCH_DELAY = 1000;
+        const allNewTrades = [];
+
+        for (let i = 0; i < state.wallets.length; i += BATCH_SIZE) {
+          const batch = state.wallets.slice(i, i + BATCH_SIZE);
+          const results = await Promise.allSettled(
+            batch.map(async (wallet) => {
+              try {
+                const data = await fetchTrades(wallet.address, 20);
+                const trades = Array.isArray(data) ? data : [];
+                return trades.map((t) => ({
+                  walletAddress: wallet.address,
+                  walletNickname: wallet.nickname,
+                  walletTags: wallet.tags,
+                  side: t.side || 'BUY',
+                  outcome: t.outcome || (t.outcomeIndex === 0 ? 'Yes' : t.outcomeIndex === 1 ? 'No' : 'Yes'),
+                  title: t.title || t.market || 'Unknown',
+                  slug: t.eventSlug || t.slug || '',
+                  conditionId: t.conditionId || t.condition_id || '',
+                  size: parseFloat(t.size || t.amount || 0),
+                  price: parseFloat(t.price || 0),
+                  dollarValue: parseFloat(t.usdcSize || 0) || (parseFloat(t.size || 0) * parseFloat(t.price || 0)),
+                  timestamp: typeof t.timestamp === 'string' ? Math.floor(new Date(t.timestamp).getTime() / 1000) : (t.timestamp || Math.floor(Date.now() / 1000)),
+                  transactionHash: t.transactionHash || t.transaction_hash || `${wallet.address}-${t.timestamp}-${Math.random()}`,
+                }));
+              } catch (e) {
+                if (e.status === 429) {
+                  dispatch({ type: 'SET_ERROR', error: 'Rate limited — backing off. Will retry next cycle.' });
+                }
+                return [];
+              }
+            })
+          );
+
+          results.forEach((r) => {
+            if (r.status === 'fulfilled' && r.value.length > 0) {
+              allNewTrades.push(...r.value);
+            }
+          });
+
+          const progress = Math.min(100, Math.round(((i + BATCH_SIZE) / state.wallets.length) * 100));
+          dispatch({ type: 'SET_POLLING_STATUS', status: { progress } });
+
+          if (i + BATCH_SIZE < state.wallets.length) {
+            await sleep(BATCH_DELAY);
+          }
+        }
+
+        if (allNewTrades.length > 0) {
+          dispatch({ type: 'ADD_TRADES', trades: allNewTrades });
+        }
+
+        // Detect convergence using ALL trades in feed (after adding new ones)
+        const allFeedTrades = [...allNewTrades, ...state.activityFeed];
+        const uniqueTrades = [];
+        const seenHashes = new Set();
+        for (const t of allFeedTrades) {
+          if (!seenHashes.has(t.transactionHash)) {
+            seenHashes.add(t.transactionHash);
+            uniqueTrades.push(t);
+          }
+        }
+        const alerts = await detectConvergence(uniqueTrades, state.wallets, state.settings.timeWindow);
+        dispatch({ type: 'SET_CONVERGENCE_ALERTS', alerts });
+
+        const now = Date.now();
+        dispatch({
+          type: 'SET_POLLING_STATUS',
+          status: { isPolling: false, lastPollAt: now, nextPollAt: now + state.settings.refreshInterval * 1000, progress: 100 },
+        });
+        pollInProgressRef.current = false;
+      }, [state.wallets, state.activityFeed, state.settings]);
+
+      // Auto-poll interval
+      useEffect(() => {
+        if (state.wallets.length === 0) return;
+
+        // Run immediately on first wallet add
+        if (!state.polling.lastPollAt) {
+          runPollCycle();
+        }
+
+        pollTimerRef.current = setInterval(() => {
+          runPollCycle();
+        }, state.settings.refreshInterval * 1000);
+
+        return () => {
+          if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+        };
+      }, [state.wallets.length, state.settings.refreshInterval]);
+
+      // Re-run convergence when time window changes
+      useEffect(() => {
+        if (state.activityFeed.length > 0) {
+          (async () => {
+            const alerts = await detectConvergence(state.activityFeed, state.wallets, state.settings.timeWindow);
+            dispatch({ type: 'SET_CONVERGENCE_ALERTS', alerts });
+          })();
+        }
+      }, [state.settings.timeWindow]);
+
+      const handleRefresh = () => {
+        if (!pollInProgressRef.current) runPollCycle();
+      };
+
+      if (isMobile) {
+        return (
+          <div className="h-screen flex flex-col bg-navy-900">
+            <Toasts toasts={state.toasts} dispatch={dispatch} />
+            <ErrorBanner errors={state.errors} dispatch={dispatch} />
+            {/* Mobile Header */}
+            <div className="px-4 py-2.5 border-b border-navy-700/50 bg-navy-800 flex items-center gap-2">
+              <span className="text-accent-green font-mono font-bold text-sm">PM</span>
+              <span className="font-sans font-semibold text-sm text-slate-200">Alpha Tracker</span>
+            </div>
+            <MobileNav tab={mobileTab} setTab={setMobileTab} />
+            <div className="flex-1 overflow-hidden">
+              {mobileTab === 'wallets' && (
+                <div className="h-full overflow-y-auto bg-navy-800">
+                  <AddWalletForm dispatch={dispatch} wallets={state.wallets} />
+                  <WalletList wallets={state.wallets} dispatch={dispatch} />
+                  <LeaderboardSection state={state} dispatch={dispatch} />
+                </div>
+              )}
+              {mobileTab === 'feed' && <CenterPanel state={state} dispatch={dispatch} onRefresh={handleRefresh} />}
+              {mobileTab === 'alerts' && <RightPanel state={state} />}
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="h-screen flex flex-col bg-navy-900">
+          <Toasts toasts={state.toasts} dispatch={dispatch} />
+          <ErrorBanner errors={state.errors} dispatch={dispatch} />
+          {/* Top Bar */}
+          <div className="px-4 py-2 border-b border-navy-700/50 bg-navy-800 flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-3">
+              <span className="text-accent-green font-mono font-bold text-base tracking-tight">PM</span>
+              <span className="font-sans font-semibold text-sm text-slate-200">Alpha Tracker</span>
+              <span className="text-[10px] font-mono text-slate-600 bg-navy-700 px-1.5 py-0.5 rounded">v1.0</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-mono text-slate-600">
+                {state.wallets.length} wallet{state.wallets.length !== 1 ? 's' : ''}
+                {' · '}{state.activityFeed.length} trade{state.activityFeed.length !== 1 ? 's' : ''}
+                {' · '}{state.convergenceAlerts.length} alert{state.convergenceAlerts.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+          </div>
+          {/* Main Layout */}
+          <div className="flex flex-1 overflow-hidden">
+            <LeftPanel state={state} dispatch={dispatch} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} />
+            <CenterPanel state={state} dispatch={dispatch} onRefresh={handleRefresh} />
+            <RightPanel state={state} />
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
