@@ -484,7 +484,7 @@
     };
 
     // ─── Wallet Card ───
-    const WalletCard = ({ wallet, dispatch }) => {
+    const WalletCard = ({ wallet, dispatch, onWalletClick }) => {
       const [confirm, setConfirm] = useState(false);
       const [copied, setCopied] = useState(false);
       const isActive = wallet.lastTradeAt && (Date.now() / 1000 - wallet.lastTradeAt) < 3600;
@@ -503,7 +503,7 @@
           <div className="flex items-start justify-between">
             <div className="flex items-center gap-2 min-w-0">
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isActive ? 'bg-accent-green pulse-dot' : 'bg-slate-600'}`} />
-              <a href={`https://polymarket.com/profile/${wallet.address}`} target="_blank" rel="noopener noreferrer" className="font-sans font-medium text-sm text-slate-200 truncate hover:text-accent-green transition">{wallet.nickname}</a>
+              <button onClick={() => onWalletClick && onWalletClick(wallet.address)} className="font-sans font-medium text-sm text-slate-200 truncate hover:text-accent-green transition text-left">{displayNickname(wallet.nickname)}</button>
             </div>
             <button onClick={() => setConfirm(true)} className="text-slate-600 hover:text-accent-red opacity-0 group-hover:opacity-100 transition flex-shrink-0">
               <Icon name="Trash2" size={13} />
@@ -525,7 +525,7 @@
     };
 
     // ─── Wallet List ───
-    const WalletList = ({ wallets, dispatch }) => {
+    const WalletList = ({ wallets, dispatch, onWalletClick }) => {
       const [search, setSearch] = useState('');
       const [tagFilter, setTagFilter] = useState(null);
       const [sort, setSort] = useState('recent');
@@ -577,7 +577,7 @@
                 {wallets.length === 0 ? 'No wallets added yet' : 'No wallets match filters'}
               </p>
             )}
-            {filtered.map((w) => <WalletCard key={w.address} wallet={w} dispatch={dispatch} />)}
+            {filtered.map((w) => <WalletCard key={w.address} wallet={w} dispatch={dispatch} onWalletClick={onWalletClick} />)}
           </div>
           <div className="px-3 py-1.5 border-t border-navy-700/50">
             <span className="text-[10px] text-slate-600 font-sans">{wallets.length} wallet{wallets.length !== 1 ? 's' : ''} tracked</span>
@@ -719,7 +719,7 @@
     };
 
     // ─── Left Panel (Sidebar) ───
-    const LeftPanel = ({ state, dispatch, collapsed, setCollapsed }) => {
+    const LeftPanel = ({ state, dispatch, collapsed, setCollapsed, onWalletClick }) => {
       const [showBulk, setShowBulk] = useState(false);
 
       return (
@@ -750,7 +750,7 @@
                     </button>
                   </div>
                   <div className="border-t border-navy-700/50">
-                    <WalletList wallets={state.wallets} dispatch={dispatch} />
+                    <WalletList wallets={state.wallets} dispatch={dispatch} onWalletClick={onWalletClick} />
                   </div>
                   <LeaderboardSection state={state} dispatch={dispatch} />
                 </div>
@@ -773,12 +773,11 @@
     };
 
     // ─── Trade Card ───
-    const TradeCard = ({ trade }) => {
+    const TradeCard = ({ trade, onWalletClick }) => {
       const isBuy = trade.side === 'BUY';
       const directionLabel = `${trade.side} ${trade.outcome}`;
       const odds = Math.round(trade.price * 100);
       const marketUrl = trade.slug ? `https://polymarket.com/event/${trade.slug}` : null;
-      const profileUrl = `https://polymarket.com/profile/${trade.walletAddress}`;
       const isWhale = trade.dollarValue >= 5000;
 
       return (
@@ -786,9 +785,9 @@
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="font-sans font-medium text-sm text-slate-200 hover:text-accent-green transition truncate">
+                <button onClick={() => onWalletClick && onWalletClick(trade.walletAddress)} className="font-sans font-medium text-sm text-slate-200 hover:text-accent-green transition truncate text-left">
                   {displayNickname(trade.walletNickname)}
-                </a>
+                </button>
                 {trade.walletTags?.[0] && <TagPill tag={trade.walletTags[0]} small />}
               </div>
               <div className="text-sm font-sans text-slate-300 mb-1.5 leading-snug">
@@ -819,7 +818,7 @@
     };
 
     // ─── Center Panel (Activity Feed) ───
-    const CenterPanel = ({ state, dispatch, onRefresh }) => {
+    const CenterPanel = ({ state, dispatch, onRefresh, onWalletClick }) => {
       const { settings, activityFeed, polling } = state;
       const [countdown, setCountdown] = useState(settings.refreshInterval);
 
@@ -940,7 +939,7 @@
                 <p className="font-sans text-xs text-slate-600 mt-1">Try lowering the dollar threshold or expanding the time window</p>
               </div>
             ) : (
-              filteredFeed.map((trade) => <TradeCard key={trade.transactionHash || `${trade.walletAddress}-${trade.timestamp}`} trade={trade} />)
+              filteredFeed.map((trade) => <TradeCard key={trade.transactionHash || `${trade.walletAddress}-${trade.timestamp}`} trade={trade} onWalletClick={onWalletClick} />)
             )}
           </div>
 
@@ -955,7 +954,7 @@
     };
 
     // ─── Convergence Alert Card ───
-    const ConvergenceCard = ({ alert }) => {
+    const ConvergenceCard = ({ alert, onWalletClick, wallets }) => {
       const isBuy = alert.direction.startsWith('BUY');
       const marketUrl = alert.slug ? `https://polymarket.com/event/${alert.slug}` : null;
       const strengthLabel = alert.strength >= 3 ? 'Strong' : 'Moderate';
@@ -977,9 +976,14 @@
           </div>
           <div className="ml-7 space-y-1.5">
             <div className="flex flex-wrap gap-1">
-              {alert.wallets.map((name) => (
-                <span key={name} className="text-[10px] px-1.5 py-0 bg-navy-700 text-slate-300 rounded font-sans truncate max-w-[140px]" title={name}>{displayNickname(name)}</span>
-              ))}
+              {alert.wallets.map((name) => {
+                const w = wallets && wallets.find((wl) => wl.nickname === name);
+                return w && onWalletClick ? (
+                  <button key={name} onClick={() => onWalletClick(w.address)} className="text-[10px] px-1.5 py-0 bg-navy-700 text-slate-300 rounded font-sans truncate max-w-[140px] hover:text-accent-green hover:bg-navy-600 transition" title={name}>{displayNickname(name)}</button>
+                ) : (
+                  <span key={name} className="text-[10px] px-1.5 py-0 bg-navy-700 text-slate-300 rounded font-sans truncate max-w-[140px]" title={name}>{displayNickname(name)}</span>
+                );
+              })}
             </div>
             <div className="flex items-center gap-3 text-[11px] font-mono">
               <span className="text-slate-300">{formatDollars(alert.totalAmount)} total</span>
@@ -1001,8 +1005,190 @@
       );
     };
 
+    // ─── Wallet Profile View ───
+    const WalletProfile = ({ address, wallets, onClose, onWalletClick }) => {
+      const [trades, setTrades] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+
+      const wallet = wallets.find((w) => w.address === address);
+      const nickname = wallet ? wallet.nickname : formatAddress(address);
+      const tags = wallet ? wallet.tags : [];
+
+      useEffect(() => {
+        let cancelled = false;
+        const load = async () => {
+          setLoading(true);
+          setError(null);
+          try {
+            const data = await fetchTrades(address, 100);
+            if (cancelled) return;
+            const parsed = (Array.isArray(data) ? data : []).map((t) => ({
+              walletAddress: address,
+              walletNickname: nickname,
+              walletTags: tags,
+              side: t.side || 'BUY',
+              outcome: t.outcome || (t.outcomeIndex === 0 ? 'Yes' : t.outcomeIndex === 1 ? 'No' : 'Yes'),
+              title: t.title || t.market || 'Unknown',
+              slug: t.eventSlug || t.slug || '',
+              conditionId: t.conditionId || t.condition_id || '',
+              size: parseFloat(t.size || t.amount || 0),
+              price: parseFloat(t.price || 0),
+              dollarValue: parseFloat(t.usdcSize || 0) || (parseFloat(t.size || 0) * parseFloat(t.price || 0)),
+              timestamp: typeof t.timestamp === 'string' ? Math.floor(new Date(t.timestamp).getTime() / 1000) : (t.timestamp || Math.floor(Date.now() / 1000)),
+              transactionHash: t.transactionHash || t.transaction_hash || `${address}-${t.timestamp}-${Math.random()}`,
+            }));
+            setTrades(parsed);
+          } catch (e) {
+            if (!cancelled) setError(e.message || 'Failed to load trades');
+          } finally {
+            if (!cancelled) setLoading(false);
+          }
+        };
+        load();
+        return () => { cancelled = true; };
+      }, [address]);
+
+      // Escape key to close
+      useEffect(() => {
+        const handleKey = (e) => { if (e.key === 'Escape') onClose(); };
+        window.addEventListener('keydown', handleKey);
+        return () => window.removeEventListener('keydown', handleKey);
+      }, [onClose]);
+
+      // Compute stats
+      const stats = useMemo(() => {
+        if (trades.length === 0) return null;
+        const totalVolume = trades.reduce((s, t) => s + t.dollarValue, 0);
+        const buys = trades.filter((t) => t.side === 'BUY').length;
+        const sells = trades.length - buys;
+        const avgSize = totalVolume / trades.length;
+        const largest = Math.max(...trades.map((t) => t.dollarValue));
+        return { totalVolume, count: trades.length, buys, sells, avgSize, largest };
+      }, [trades]);
+
+      // Top markets by trade count
+      const topMarkets = useMemo(() => {
+        const map = {};
+        trades.forEach((t) => {
+          const key = t.title;
+          if (!map[key]) map[key] = { title: key, slug: t.slug, count: 0, volume: 0 };
+          map[key].count++;
+          map[key].volume += t.dollarValue;
+        });
+        return Object.values(map).sort((a, b) => b.count - a.count).slice(0, 5);
+      }, [trades]);
+
+      return (
+        <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
+          {/* Header */}
+          <div className="px-4 py-2.5 border-b border-navy-700/50 flex items-center gap-3 bg-navy-800">
+            <button onClick={onClose} className="text-slate-400 hover:text-slate-200 transition flex items-center gap-1 text-xs font-sans">
+              <Icon name="ArrowLeft" size={14} /> Back
+            </button>
+            <div className="h-4 border-l border-navy-600" />
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <Icon name="User" size={14} className="text-accent-green flex-shrink-0" />
+              <span className="font-sans font-semibold text-sm text-slate-200 truncate">{displayNickname(nickname)}</span>
+              {tags.map((tag) => <TagPill key={tag} tag={tag} small />)}
+            </div>
+            <a href={`https://polymarket.com/profile/${address}`} target="_blank" rel="noopener noreferrer" className="text-[11px] font-sans text-slate-500 hover:text-accent-green transition flex items-center gap-1 flex-shrink-0">
+              Polymarket <Icon name="ExternalLink" size={10} />
+            </a>
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 overflow-y-auto">
+            {loading ? (
+              <div className="p-6 space-y-4">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="animate-pulse">
+                    <div className="h-3 bg-navy-700 rounded w-1/3 mb-2" />
+                    <div className="h-2 bg-navy-700/50 rounded w-2/3" />
+                  </div>
+                ))}
+                <p className="text-xs text-slate-500 font-sans text-center mt-4">Loading trades...</p>
+              </div>
+            ) : error ? (
+              <div className="flex flex-col items-center justify-center h-64 px-8 text-center">
+                <Icon name="AlertCircle" size={28} className="text-accent-red mb-3" />
+                <p className="font-sans text-sm text-slate-300 mb-2">Failed to load profile</p>
+                <p className="font-sans text-xs text-slate-500 mb-3">{error}</p>
+                <button onClick={() => { setLoading(true); setError(null); fetchTrades(address, 100).then((data) => { setTrades((Array.isArray(data) ? data : []).map((t) => ({ walletAddress: address, walletNickname: nickname, walletTags: tags, side: t.side || 'BUY', outcome: t.outcome || (t.outcomeIndex === 0 ? 'Yes' : t.outcomeIndex === 1 ? 'No' : 'Yes'), title: t.title || t.market || 'Unknown', slug: t.eventSlug || t.slug || '', conditionId: t.conditionId || t.condition_id || '', size: parseFloat(t.size || t.amount || 0), price: parseFloat(t.price || 0), dollarValue: parseFloat(t.usdcSize || 0) || (parseFloat(t.size || 0) * parseFloat(t.price || 0)), timestamp: typeof t.timestamp === 'string' ? Math.floor(new Date(t.timestamp).getTime() / 1000) : (t.timestamp || Math.floor(Date.now() / 1000)), transactionHash: t.transactionHash || t.transaction_hash || `${address}-${t.timestamp}-${Math.random()}` }))); setLoading(false); }).catch((e) => { setError(e.message); setLoading(false); }); }} className="text-xs font-sans text-accent-green border border-accent-green/30 rounded px-3 py-1 hover:bg-accent-green/10 transition flex items-center gap-1">
+                  <Icon name="RefreshCw" size={11} /> Retry
+                </button>
+              </div>
+            ) : trades.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-64 px-8 text-center">
+                <Icon name="Inbox" size={28} className="text-slate-600 mb-3" />
+                <p className="font-sans text-sm text-slate-500">No recent trades found</p>
+              </div>
+            ) : (
+              <Fragment>
+                {/* Stats Grid */}
+                {stats && (
+                  <div className="grid grid-cols-3 gap-px bg-navy-700/30 border-b border-navy-700/50">
+                    {[
+                      ['Volume', formatDollars(stats.totalVolume)],
+                      ['Trades', stats.count],
+                      ['Buys / Sells', `${stats.buys} / ${stats.sells}`],
+                      ['Avg Size', formatDollars(stats.avgSize)],
+                      ['Largest', formatDollars(stats.largest)],
+                      ['Win Rate', '—'],
+                    ].map(([label, val]) => (
+                      <div key={label} className="bg-navy-800 px-3 py-2.5">
+                        <div className="text-[10px] font-sans text-slate-500 uppercase tracking-wider mb-0.5">{label}</div>
+                        <div className="text-sm font-mono text-slate-200 font-medium">{val}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Top Markets */}
+                {topMarkets.length > 0 && (
+                  <div className="border-b border-navy-700/50">
+                    <div className="px-4 py-2 bg-navy-800/50">
+                      <h3 className="text-[11px] font-sans font-semibold text-slate-400 uppercase tracking-wider">Top Markets</h3>
+                    </div>
+                    {topMarkets.map((m, i) => (
+                      <div key={i} className="px-4 py-2 border-b border-navy-700/20 hover:bg-navy-700/20 transition flex items-center justify-between">
+                        <div className="min-w-0 flex-1">
+                          {m.slug ? (
+                            <a href={`https://polymarket.com/event/${m.slug}`} target="_blank" rel="noopener noreferrer" className="font-sans text-xs text-slate-300 hover:text-accent-green transition truncate block">{m.title}</a>
+                          ) : (
+                            <span className="font-sans text-xs text-slate-300 truncate block">{m.title}</span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3 flex-shrink-0 ml-3">
+                          <span className="text-[10px] font-mono text-slate-500">{m.count} trade{m.count > 1 ? 's' : ''}</span>
+                          <span className="text-[10px] font-mono text-slate-400">{formatDollars(m.volume)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Recent Trades */}
+                <div className="px-4 py-2 bg-navy-800/50">
+                  <h3 className="text-[11px] font-sans font-semibold text-slate-400 uppercase tracking-wider">Recent Trades</h3>
+                </div>
+                {trades.map((trade) => <TradeCard key={trade.transactionHash || `${trade.walletAddress}-${trade.timestamp}`} trade={trade} onWalletClick={onWalletClick} />)}
+              </Fragment>
+            )}
+          </div>
+
+          {/* Footer */}
+          {!loading && trades.length > 0 && (
+            <div className="px-4 py-1 border-t border-navy-700/30 bg-navy-800/50">
+              <span className="text-[10px] font-mono text-slate-600">{trades.length} trade{trades.length !== 1 ? 's' : ''} loaded</span>
+            </div>
+          )}
+        </div>
+      );
+    };
+
     // ─── Right Panel (Convergence Alerts) ───
-    const RightPanel = ({ state }) => {
+    const RightPanel = ({ state, onWalletClick }) => {
       const [showInfo, setShowInfo] = useState(false);
 
       return (
@@ -1033,7 +1219,7 @@
                 <p className="font-sans text-xs text-slate-600">Try expanding the time window or adding more wallets to your watchlist</p>
               </div>
             ) : (
-              state.convergenceAlerts.map((alert, i) => <ConvergenceCard key={`${alert.conditionId}-${alert.direction}-${i}`} alert={alert} />)
+              state.convergenceAlerts.map((alert, i) => <ConvergenceCard key={`${alert.conditionId}-${alert.direction}-${i}`} alert={alert} onWalletClick={onWalletClick} wallets={state.wallets} />)
             )}
           </div>
           <div className="px-4 py-1.5 border-t border-navy-700/30">
@@ -1063,8 +1249,19 @@
       const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
       const [mobileTab, setMobileTab] = useState('feed');
       const [isMobile, setIsMobile] = useState(window.innerWidth < 1024);
+      const [selectedWallet, setSelectedWallet] = useState(null);
       const pollTimerRef = useRef(null);
       const pollInProgressRef = useRef(false);
+
+      const openWalletProfile = useCallback((address) => {
+        setSelectedWallet(address);
+        if (isMobile) setMobileTab('profile');
+      }, [isMobile]);
+
+      const closeWalletProfile = useCallback(() => {
+        setSelectedWallet(null);
+        if (isMobile) setMobileTab('feed');
+      }, [isMobile]);
 
       useEffect(() => {
         const handleResize = () => setIsMobile(window.innerWidth < 1024);
@@ -1180,6 +1377,13 @@
         }
       }, [state.settings.timeWindow]);
 
+      // Auto-close profile if wallet removed from watchlist
+      useEffect(() => {
+        if (selectedWallet && !state.wallets.some((w) => w.address === selectedWallet)) {
+          closeWalletProfile();
+        }
+      }, [state.wallets, selectedWallet, closeWalletProfile]);
+
       const handleRefresh = () => {
         if (!pollInProgressRef.current) runPollCycle();
       };
@@ -1194,17 +1398,18 @@
               <span className="text-accent-green font-mono font-bold text-sm">PM</span>
               <span className="font-sans font-semibold text-sm text-slate-200">Alpha Tracker</span>
             </div>
-            <MobileNav tab={mobileTab} setTab={setMobileTab} />
+            {mobileTab !== 'profile' && <MobileNav tab={mobileTab} setTab={setMobileTab} />}
             <div className="flex-1 overflow-hidden">
               {mobileTab === 'wallets' && (
                 <div className="h-full overflow-y-auto bg-navy-800">
                   <AddWalletForm dispatch={dispatch} wallets={state.wallets} />
-                  <WalletList wallets={state.wallets} dispatch={dispatch} />
+                  <WalletList wallets={state.wallets} dispatch={dispatch} onWalletClick={openWalletProfile} />
                   <LeaderboardSection state={state} dispatch={dispatch} />
                 </div>
               )}
-              {mobileTab === 'feed' && <CenterPanel state={state} dispatch={dispatch} onRefresh={handleRefresh} />}
-              {mobileTab === 'alerts' && <RightPanel state={state} />}
+              {mobileTab === 'feed' && <CenterPanel state={state} dispatch={dispatch} onRefresh={handleRefresh} onWalletClick={openWalletProfile} />}
+              {mobileTab === 'alerts' && <RightPanel state={state} onWalletClick={openWalletProfile} />}
+              {mobileTab === 'profile' && selectedWallet && <WalletProfile address={selectedWallet} wallets={state.wallets} onClose={closeWalletProfile} onWalletClick={openWalletProfile} />}
             </div>
           </div>
         );
@@ -1231,9 +1436,13 @@
           </div>
           {/* Main Layout */}
           <div className="flex flex-1 overflow-hidden">
-            <LeftPanel state={state} dispatch={dispatch} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} />
-            <CenterPanel state={state} dispatch={dispatch} onRefresh={handleRefresh} />
-            <RightPanel state={state} />
+            <LeftPanel state={state} dispatch={dispatch} collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed} onWalletClick={openWalletProfile} />
+            {selectedWallet ? (
+              <WalletProfile address={selectedWallet} wallets={state.wallets} onClose={closeWalletProfile} onWalletClick={openWalletProfile} />
+            ) : (
+              <CenterPanel state={state} dispatch={dispatch} onRefresh={handleRefresh} onWalletClick={openWalletProfile} />
+            )}
+            <RightPanel state={state} onWalletClick={openWalletProfile} />
           </div>
         </div>
       );
